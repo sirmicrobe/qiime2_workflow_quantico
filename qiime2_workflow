@@ -1,0 +1,168 @@
+#qiime2-2018.2
+
+#import multiplexed reads into qiime2
+qiime tools import --type EMPPairedEndSequences --input-path qiime2_out --output-path ~/qiime2_out/multiplexed-seqs.qza
+
+#demultiplex sequence reads
+qiime demux emp-paired --i-seqs ~/qiime2_out/multiplexed-seqs.qza --m-barcodes-file quantico_map_all.txt --m-barcodes-column BarcodeSequence --p-no-rev-comp-barcodes --o-per-sample-sequences ~/qiime2_out/demux.qza
+
+#cut adapters if still present in sequences
+qiime cutadapt trim-paired --i-demultiplexed-sequences demux.qza --p-cores 16 --p-anywhere-f GTGTGYCAGCMGCCGCGGTAA --p-error-rate 0 --o-trimmed-sequences trimmed-seqs.qza --verbose
+
+#vizualize read quality
+qiime demux summarize \
+  --i-data trimmed-seqs.qza \
+  --o-visualization trimmed-seqs.qzv
+  
+qiime tools view trimmed-seqs.qzv
+
+#filter reads using DADA2
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs trimmed-seqs.qza \
+  --p-trunc-len-f 0 \
+  --p-trunc-len-r 151 \
+  --o-representative-sequences all-rep-seqs.qza \
+  --o-table merged-table.qza \
+  --p-n-threads 16
+
+#filter out sample from mesocosm
+qiime feature-table filter-samples \
+  --i-table merged-table.qza \
+  --m-metadata-file quantico_map_all.txt \
+  --o-filtered-table merged-table.qza
+  
+#seqs per sample and summary stats
+qiime feature-table summarize \
+  --i-table merged-table.qza \
+  --o-visualization merged-table.qzv \
+  --m-sample-metadata-file quantico_map_all.txt
+#map features to seqs and facilitate blast
+srun qiime feature-table tabulate-seqs \
+  --i-data all-rep-seqs.qza \
+  --o-visualization all-rep-seqs.qzv
+  
+#multiple sequence alignment with mafft
+qiime alignment mafft \
+  --i-sequences all-rep-seqs.qza \
+  --o-alignment aligned-rep-seqs.qza \
+  --p-n-threads 24 #-1 uses all available cores
+  
+#mask/filter highly variable positions that add noise to phylogenetic tree
+qiime alignment mask \
+  --i-alignment aligned-rep-seqs.qza \
+  --o-masked-alignment masked-aligned-rep-seqs.qza
+  
+#use FastTree to generate unrooted tree
+qiime phylogeny fasttree \
+  --i-alignment masked-aligned-rep-seqs.qza \
+  --o-tree unrooted-tree.qza 
+
+  
+#need to root tree for Faith's PD and unifrac
+qiime phylogeny midpoint-root \
+  --i-tree unrooted-tree.qza \
+  --o-rooted-tree rooted-tree.qza
+
+#core diversity - alpha and beta diversity
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny rooted-tree.qza \
+  --i-table merged-table.qza \
+  --p-sampling-depth 5750 \
+  --m-metadata-file quantico_map_all.txt \
+  --p-n-jobs 24 \
+  --output-dir core-metrics-results
+  #13 sec 221%CPU
+  
+#alpha rarefaction
+qiime diversity alpha-rarefaction \
+  --i-table merged-table.qza \
+  --i-phylogeny rooted-tree.qza \
+  --p-max-depth 5750 \
+  --m-metadata-file quantico_map_all.txt \
+  --o-visualization alpha-rarefaction.qzv
+
+#Faith Phylogenetic Diversity (a measure of community richness) and evenness metrics
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results/faith_pd_vector.qza \
+  --m-metadata-file quantico_map_all.txt \
+  --o-visualization core-metrics-results/faith-pd-group-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results/evenness_vector.qza \
+  --m-metadata-file quantico_map_all.txt \
+  --o-visualization core-metrics-results/evenness-group-significance.qzv
+
+#PERMANOVA
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file quantico_map_all.txt \
+  --m-metadata-column plot_day_depth \
+  --o-visualization core-metrics-results/weighted-unifrac-plot_day_depth-significance.qzv \
+  --p-pairwise
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file quantico_map_all.txt \
+  --m-metadata-column plot_num \
+  --o-visualization core-metrics-results/weighted-unifrac-plot-group-significance.qzv \
+  --p-pairwise
+  
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file quantico_map_all.txt \
+  --m-metadata-column plot_day_depth \
+  --o-visualization core-metrics-results/unweighted-unifrac-plot_day_depth-significance.qzv \
+  --p-pairwise
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file quantico_map_all.txt \
+  --m-metadata-column plot_num \
+  --o-visualization core-metrics-results/unweighted-unifrac-plot-group-significance.qzv \
+  --p-pairwise
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file quantico_map_all.txt \
+  --m-metadata-column plot_day \
+  --o-visualization core-metrics-results/unweighted-unifrac-plot-day-group-significance.qzv \
+  --p-pairwise
+
+#train classifier - SILVA 132
+qiime feature-classifier classify-sklearn --i-classifier ~/database/train
+ing-feature-classifiers/SILVA_132_QIIME_release/taxonomy/silva-132-99-515-806-nb
+-classifier.qza --i-reads all-rep-seqs.qza --o-classification silva_taxonomy
+.qza --p-n-jobs 8
+  
+qiime metadata tabulate \
+  --m-input-file taxonomy.qza \
+  --o-visualization taxonomy.qzv
+  
+qiime metadata tabulate \
+  --m-input-file silva_taxonomy.qza \
+  --o-visualization silva_taxonomy.qzv
+
+#make barplots
+qiime taxa barplot \
+  --i-table merged-table.qza  \
+  --i-taxonomy taxonomy.qza \
+  --m-metadata-file quantico_map_all.txt \
+  --o-visualization taxa-bar-plots.qzv
+  
+#export biom v2.1 file
+qiime tools export \
+  merged-table.qza \
+  --output-dir exported-feature-table
+#export newick tree
+qiime tools export \
+  rooted-tree.qza \
+  --output-dir exported-feature-table
+#output rep set seqs
+qiime tools export all-rep-seqs.qza --output-dir exported-feature-table
+
+#convert biom to otu table
+biom convert -i feature-table.biom -o otu_table.txt --to-tsv
+
+qiime tools export \
+  silva_taxonomy.qza \
+  --output-dir exported-feature-table
